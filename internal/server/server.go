@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sssstore/sssstore/internal/audit"
 	"github.com/sssstore/sssstore/internal/auth"
 	"github.com/sssstore/sssstore/internal/config"
 	"github.com/sssstore/sssstore/internal/s3api"
@@ -27,6 +28,12 @@ func Run(cfg config.Config) error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	store := storage.New(cfg.DataDir)
 
+	auditLog, err := audit.New(cfg.AuditLogPath)
+	if err != nil {
+		return err
+	}
+	defer auditLog.Close()
+
 	keys := []string{cfg.AdminAccessKey}
 	users, _ := config.LoadUsers(cfg.DataDir)
 	for _, u := range users {
@@ -36,7 +43,11 @@ func Run(cfg config.Config) error {
 	s3 := s3api.New(store, a)
 	m := &metrics{}
 
-	handler := loggingMiddleware(logger, m, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go runLifecycleWorker(ctx, logger, auditLog, store, time.Duration(cfg.MultipartMaxAgeHours)*time.Hour)
+
+	handler := loggingMiddleware(logger, auditLog, m, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/healthz", "/readyz":
 			w.Header().Set("Content-Type", "application/json")
@@ -56,7 +67,11 @@ func Run(cfg config.Config) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("sssstore listening", "addr", cfg.BindAddr)
+		logger.Info("sssstore listening", "addr", cfg.BindAddr, "tls", cfg.TLSCertFile != "")
+		if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
+			errCh <- srv.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+			return
+		}
 		errCh <- srv.ListenAndServe()
 	}()
 
@@ -66,14 +81,38 @@ func Run(cfg config.Config) error {
 	select {
 	case sig := <-sigCh:
 		logger.Info("received signal; shutting down", "signal", sig.String())
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return srv.Shutdown(ctx)
+		cancel()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		return srv.Shutdown(shutdownCtx)
 	case err := <-errCh:
+		cancel()
 		if err == http.ErrServerClosed {
 			return nil
 		}
 		return err
+	}
+}
+
+func runLifecycleWorker(ctx context.Context, logger *slog.Logger, auditLog *audit.Logger, store *storage.Store, maxAge time.Duration) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			removed, err := store.CleanupStaleMultipartUploads(maxAge)
+			if err != nil {
+				logger.Error("lifecycle cleanup failed", "error", err)
+				auditLog.Log(audit.Event{Action: "lifecycle.cleanup", Message: err.Error()})
+				continue
+			}
+			if removed > 0 {
+				logger.Info("lifecycle cleanup removed stale multipart uploads", "removed", removed)
+				auditLog.Log(audit.Event{Action: "lifecycle.cleanup", Message: fmt.Sprintf("removed=%d", removed)})
+			}
+		}
 	}
 }
 
@@ -87,7 +126,7 @@ func (w *captureWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
-func loggingMiddleware(logger *slog.Logger, m *metrics, next http.Handler) http.Handler {
+func loggingMiddleware(logger *slog.Logger, auditLog *audit.Logger, m *metrics, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		cw := &captureWriter{ResponseWriter: w, status: http.StatusOK}
@@ -96,6 +135,8 @@ func loggingMiddleware(logger *slog.Logger, m *metrics, next http.Handler) http.
 		if cw.status >= 400 {
 			atomic.AddUint64(&m.errors, 1)
 		}
-		logger.Info("http request", "method", r.Method, "path", r.URL.Path, "status", cw.status, "remote", r.RemoteAddr, "duration_ms", time.Since(start).Milliseconds())
+		key := auth.AccessKeyFromRequest(r)
+		auditLog.Log(audit.Event{Action: "http.request", Method: r.Method, Path: r.URL.Path, Status: cw.status, Principal: key, Remote: r.RemoteAddr})
+		logger.Info("http request", "method", r.Method, "path", r.URL.Path, "status", cw.status, "principal", key, "remote", r.RemoteAddr, "duration_ms", time.Since(start).Milliseconds())
 	})
 }

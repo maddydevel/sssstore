@@ -12,7 +12,7 @@ go run ./cmd/sssstore server --config ./sssstore.json
 
 Server defaults to `:9000`.
 
-## Supported APIs (Phase 1 MVP core)
+## Supported APIs (Phase 2 baseline)
 
 - Bucket: create, head, delete, list buckets
 - Objects: put/get/head/delete
@@ -25,19 +25,24 @@ Server defaults to `:9000`.
   - `DELETE /{bucket}/{key}?uploadId=...`
 - ETag persistence for uploaded objects
 
-## Authentication (SigV4 scaffold)
+## Security and auth
 
-S3 endpoints require `Authorization` header in SigV4 format and validate the access key from `Credential=<access-key>/...`.
+- S3 endpoints require an `Authorization` header with SigV4-like credential scope.
+- Access keys are validated from `Credential=<access-key>/...` against:
+  - `admin_access_key` in config
+  - users created with `sssstore user create`
+- `strict_mode` support in config:
+  - requires non-default `admin_secret_key`
+  - enforces TLS cert/key pair consistency
 
-Supported keys:
-- `admin_access_key` from config
-- users created with `sssstore user create`
-
-## Ops endpoints
+## Operability
 
 - `GET /healthz`
 - `GET /readyz`
 - `GET /metrics`
+- JSON structured server logs (`log/slog`)
+- JSON audit log file (`audit_log_path`)
+- Lifecycle worker cleans stale multipart uploads older than `multipart_max_age_hours`
 
 ## CLI commands
 

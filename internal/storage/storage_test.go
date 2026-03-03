@@ -4,6 +4,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBucketAndObjectLifecycle(t *testing.T) {
@@ -72,5 +73,41 @@ func TestMultipartLifecycle(t *testing.T) {
 	_ = rc.Close()
 	if string(b) != "abcdef" {
 		t.Fatalf("unexpected object %q", string(b))
+	}
+}
+
+func TestCleanupStaleMultipartUploads(t *testing.T) {
+	tmp := t.TempDir()
+	s := New(tmp)
+	if err := s.CreateBucket("clean-bucket"); err != nil {
+		t.Fatal(err)
+	}
+	uploadID, err := s.CreateMultipartUpload("clean-bucket", "old.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UploadPart("clean-bucket", "old.bin", uploadID, 1, strings.NewReader("x")); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := s.CleanupStaleMultipartUploads(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 0 {
+		t.Fatalf("expected zero removed, got %d", removed)
+	}
+	removed, err = s.CleanupStaleMultipartUploads(-1 * time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 0 {
+		t.Fatalf("expected zero removed for invalid maxAge, got %d", removed)
+	}
+	removed, err = s.CleanupStaleMultipartUploads(1 * time.Nanosecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed < 1 {
+		t.Fatalf("expected stale uploads removal, got %d", removed)
 	}
 }

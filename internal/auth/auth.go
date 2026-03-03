@@ -31,16 +31,24 @@ func NewStaticAuthenticator(keys []string) *StaticAuthenticator {
 	return &StaticAuthenticator{allowed: m}
 }
 
-func (a *StaticAuthenticator) Authenticate(r *http.Request) error {
+func AccessKeyFromRequest(r *http.Request) string {
 	authz := r.Header.Get("Authorization")
 	if authz == "" {
-		return ErrAccessDenied
+		return ""
 	}
 	m := credPattern.FindStringSubmatch(authz)
 	if len(m) != 2 {
+		return ""
+	}
+	return m[1]
+}
+
+func (a *StaticAuthenticator) Authenticate(r *http.Request) error {
+	key := AccessKeyFromRequest(r)
+	if key == "" {
 		return ErrAccessDenied
 	}
-	if _, ok := a.allowed[m[1]]; !ok {
+	if _, ok := a.allowed[key]; !ok {
 		return ErrAccessDenied
 	}
 	return nil
