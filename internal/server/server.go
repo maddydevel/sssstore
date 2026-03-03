@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sssstore/sssstore/internal/auth"
+	"github.com/sssstore/sssstore/internal/config"
 	"github.com/sssstore/sssstore/internal/s3api"
 	"github.com/sssstore/sssstore/internal/storage"
 )
@@ -21,10 +23,17 @@ type metrics struct {
 	errors   uint64
 }
 
-func Run(bindAddr, dataDir string) error {
+func Run(cfg config.Config) error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	store := storage.New(dataDir)
-	s3 := s3api.New(store)
+	store := storage.New(cfg.DataDir)
+
+	keys := []string{cfg.AdminAccessKey}
+	users, _ := config.LoadUsers(cfg.DataDir)
+	for _, u := range users {
+		keys = append(keys, u.AccessKey)
+	}
+	a := auth.NewStaticAuthenticator(keys)
+	s3 := s3api.New(store, a)
 	m := &metrics{}
 
 	handler := loggingMiddleware(logger, m, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -43,11 +52,11 @@ func Run(bindAddr, dataDir string) error {
 		}
 	}))
 
-	srv := &http.Server{Addr: bindAddr, Handler: handler}
+	srv := &http.Server{Addr: cfg.BindAddr, Handler: handler}
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("sssstore listening", "addr", bindAddr)
+		logger.Info("sssstore listening", "addr", cfg.BindAddr)
 		errCh <- srv.ListenAndServe()
 	}()
 
@@ -87,12 +96,6 @@ func loggingMiddleware(logger *slog.Logger, m *metrics, next http.Handler) http.
 		if cw.status >= 400 {
 			atomic.AddUint64(&m.errors, 1)
 		}
-		logger.Info("http request",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", cw.status,
-			"remote", r.RemoteAddr,
-			"duration_ms", time.Since(start).Milliseconds(),
-		)
+		logger.Info("http request", "method", r.Method, "path", r.URL.Path, "status", cw.status, "remote", r.RemoteAddr, "duration_ms", time.Since(start).Milliseconds())
 	})
 }

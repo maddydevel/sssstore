@@ -10,18 +10,27 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sssstore/sssstore/internal/auth"
 	"github.com/sssstore/sssstore/internal/storage"
 )
 
 type Handler struct {
 	store *storage.Store
+	auth  auth.Authenticator
 }
 
-func New(store *storage.Store) http.Handler {
-	return &Handler{store: store}
+func New(store *storage.Store, a auth.Authenticator) http.Handler {
+	return &Handler{store: store, auth: a}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h.auth != nil {
+		if err := h.auth.Authenticate(r); err != nil {
+			h.writeError(w, http.StatusForbidden, "AccessDenied", err.Error())
+			return
+		}
+	}
+
 	if r.URL.Path == "/" {
 		if r.Method == http.MethodGet {
 			h.listBuckets(w)
@@ -66,20 +75,101 @@ func (h *Handler) routeBucket(w http.ResponseWriter, r *http.Request, bucket str
 }
 
 func (h *Handler) routeObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	q := r.URL.Query()
 	switch r.Method {
+	case http.MethodPost:
+		if _, ok := q["uploads"]; ok {
+			h.createMultipartUpload(w, bucket, key)
+			return
+		}
+		if q.Get("uploadId") != "" {
+			h.completeMultipartUpload(w, bucket, key, q.Get("uploadId"))
+			return
+		}
+		h.writeError(w, http.StatusNotImplemented, "NotImplemented", "unsupported POST operation")
 	case http.MethodPut:
+		if q.Get("uploadId") != "" && q.Get("partNumber") != "" {
+			h.uploadPart(w, r, bucket, key, q.Get("uploadId"), q.Get("partNumber"))
+			return
+		}
 		h.putObject(w, r, bucket, key)
 	case http.MethodGet:
 		h.getObject(w, r, bucket, key)
 	case http.MethodHead:
 		h.headObject(w, bucket, key)
 	case http.MethodDelete:
+		if q.Get("uploadId") != "" {
+			h.abortMultipartUpload(w, bucket, q.Get("uploadId"))
+			return
+		}
 		h.deleteObject(w, bucket, key)
 	default:
 		h.writeError(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "unsupported method")
 	}
 }
 
+type InitiateMultipartUploadResult struct {
+	XMLName  xml.Name `xml:"InitiateMultipartUploadResult"`
+	XMLNS    string   `xml:"xmlns,attr"`
+	Bucket   string   `xml:"Bucket"`
+	Key      string   `xml:"Key"`
+	UploadID string   `xml:"UploadId"`
+}
+
+type CompleteMultipartUploadResult struct {
+	XMLName xml.Name `xml:"CompleteMultipartUploadResult"`
+	XMLNS   string   `xml:"xmlns,attr"`
+	Bucket  string   `xml:"Bucket"`
+	Key     string   `xml:"Key"`
+	ETag    string   `xml:"ETag"`
+}
+
+func (h *Handler) createMultipartUpload(w http.ResponseWriter, bucket, key string) {
+	uploadID, err := h.store.CreateMultipartUpload(bucket, key)
+	if errors.Is(err, storage.ErrBucketNotFound) {
+		h.writeError(w, http.StatusNotFound, "NoSuchBucket", err.Error())
+		return
+	}
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	h.writeXML(w, http.StatusOK, InitiateMultipartUploadResult{XMLNS: "http://s3.amazonaws.com/doc/2006-03-01/", Bucket: bucket, Key: key, UploadID: uploadID})
+}
+
+func (h *Handler) uploadPart(w http.ResponseWriter, r *http.Request, bucket, key, uploadID, partNumberRaw string) {
+	pn, err := strconv.Atoi(partNumberRaw)
+	if err != nil || pn < 1 {
+		h.writeError(w, http.StatusBadRequest, "InvalidPart", "invalid part number")
+		return
+	}
+	part, err := h.store.UploadPart(bucket, key, uploadID, pn, r.Body)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, "InvalidRequest", err.Error())
+		return
+	}
+	w.Header().Set("ETag", part.ETag)
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *Handler) completeMultipartUpload(w http.ResponseWriter, bucket, key, uploadID string) {
+	info, err := h.store.CompleteMultipartUpload(bucket, key, uploadID)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, "InvalidRequest", err.Error())
+		return
+	}
+	h.writeXML(w, http.StatusOK, CompleteMultipartUploadResult{XMLNS: "http://s3.amazonaws.com/doc/2006-03-01/", Bucket: bucket, Key: key, ETag: info.ETag})
+}
+
+func (h *Handler) abortMultipartUpload(w http.ResponseWriter, bucket, uploadID string) {
+	if err := h.store.AbortMultipartUpload(bucket, uploadID); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// rest unchanged
 type ListAllMyBucketsResult struct {
 	XMLName xml.Name     `xml:"ListAllMyBucketsResult"`
 	XMLNS   string       `xml:"xmlns,attr"`
@@ -95,7 +185,7 @@ type BucketXML struct {
 	CreationDate string `xml:"CreationDate"`
 }
 
-func (h *Handler) listBuckets(w http.ResponseWriter) {
+func (h *Handler) listBuckets(w http.ResponseWriter) { /*...*/
 	buckets, err := h.store.ListBuckets()
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
@@ -115,7 +205,6 @@ func (h *Handler) createBucket(w http.ResponseWriter, bucket string) {
 	}
 	w.WriteHeader(http.StatusOK)
 }
-
 func (h *Handler) deleteBucket(w http.ResponseWriter, bucket string) {
 	err := h.store.DeleteBucket(bucket)
 	switch {
@@ -129,7 +218,6 @@ func (h *Handler) deleteBucket(w http.ResponseWriter, bucket string) {
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
-
 func (h *Handler) headBucket(w http.ResponseWriter, bucket string) {
 	exists, err := h.store.BucketExists(bucket)
 	if err != nil {
@@ -155,7 +243,6 @@ type ListBucketResult struct {
 	NextToken         string        `xml:"NextContinuationToken,omitempty"`
 	Contents          []ObjectEntry `xml:"Contents"`
 }
-
 type ObjectEntry struct {
 	Key          string `xml:"Key"`
 	LastModified string `xml:"LastModified"`
@@ -178,22 +265,13 @@ func (h *Handler) listObjectsV2(w http.ResponseWriter, bucket, prefix, maxKeysRa
 	if maxKeys <= 0 {
 		maxKeys = 1000
 	}
-	result := ListBucketResult{
-		XMLNS:             "http://s3.amazonaws.com/doc/2006-03-01/",
-		Name:              bucket,
-		Prefix:            prefix,
-		MaxKeys:           maxKeys,
-		IsTruncated:       truncated,
-		ContinuationToken: continuationToken,
-		NextToken:         nextToken,
-	}
+	result := ListBucketResult{XMLNS: "http://s3.amazonaws.com/doc/2006-03-01/", Name: bucket, Prefix: prefix, MaxKeys: maxKeys, IsTruncated: truncated, ContinuationToken: continuationToken, NextToken: nextToken}
 	for _, obj := range objs {
 		result.Contents = append(result.Contents, ObjectEntry{Key: obj.Key, LastModified: obj.LastModified.Format(time.RFC3339), ETag: obj.ETag, Size: obj.Size, StorageClass: "STANDARD"})
 	}
 	result.KeyCount = len(result.Contents)
 	h.writeXML(w, http.StatusOK, result)
 }
-
 func (h *Handler) putObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
 	info, err := h.store.PutObject(bucket, key, r.Body)
 	if errors.Is(err, storage.ErrBucketNotFound) {
@@ -209,7 +287,6 @@ func (h *Handler) putObject(w http.ResponseWriter, r *http.Request, bucket, key 
 	}
 	w.WriteHeader(http.StatusOK)
 }
-
 func parseRange(hdr string, size int64) (start, end int64, ok bool) {
 	if !strings.HasPrefix(hdr, "bytes=") {
 		return 0, 0, false
@@ -231,7 +308,6 @@ func parseRange(hdr string, size int64) (start, end int64, ok bool) {
 	}
 	return s, e, true
 }
-
 func (h *Handler) getObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
 	rc, info, err := h.store.GetObject(bucket, key)
 	if errors.Is(err, storage.ErrObjectNotFound) {
@@ -248,7 +324,6 @@ func (h *Handler) getObject(w http.ResponseWriter, r *http.Request, bucket, key 
 	if info.ETag != "" {
 		w.Header().Set("ETag", info.ETag)
 	}
-
 	if rg := r.Header.Get("Range"); rg != "" {
 		if rs, ok := rc.(io.ReadSeeker); ok {
 			start, end, valid := parseRange(rg, info.Size)
@@ -266,10 +341,8 @@ func (h *Handler) getObject(w http.ResponseWriter, r *http.Request, bucket, key 
 			return
 		}
 	}
-
 	_, _ = io.Copy(w, rc)
 }
-
 func (h *Handler) headObject(w http.ResponseWriter, bucket, key string) {
 	rc, info, err := h.store.GetObject(bucket, key)
 	if rc != nil {
@@ -290,7 +363,6 @@ func (h *Handler) headObject(w http.ResponseWriter, bucket, key string) {
 	}
 	w.WriteHeader(http.StatusOK)
 }
-
 func (h *Handler) deleteObject(w http.ResponseWriter, bucket, key string) {
 	err := h.store.DeleteObject(bucket, key)
 	if err != nil && !errors.Is(err, storage.ErrObjectNotFound) {
@@ -309,7 +381,6 @@ type ErrorResponse struct {
 func (h *Handler) writeError(w http.ResponseWriter, status int, code, msg string) {
 	h.writeXML(w, status, ErrorResponse{Code: code, Message: msg})
 }
-
 func (h *Handler) writeXML(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(status)

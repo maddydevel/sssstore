@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"io"
 	"strings"
 	"testing"
 )
@@ -41,5 +42,35 @@ func TestBucketAndObjectLifecycle(t *testing.T) {
 	}
 	if err := s.DeleteBucket("test-bucket"); err != nil {
 		t.Fatalf("delete bucket: %v", err)
+	}
+}
+
+func TestMultipartLifecycle(t *testing.T) {
+	tmp := t.TempDir()
+	s := New(tmp)
+	if err := s.CreateBucket("mp-bucket"); err != nil {
+		t.Fatal(err)
+	}
+	uploadID, err := s.CreateMultipartUpload("mp-bucket", "big.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UploadPart("mp-bucket", "big.bin", uploadID, 1, strings.NewReader("abc")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UploadPart("mp-bucket", "big.bin", uploadID, 2, strings.NewReader("def")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CompleteMultipartUpload("mp-bucket", "big.bin", uploadID); err != nil {
+		t.Fatal(err)
+	}
+	rc, _, err := s.GetObject("mp-bucket", "big.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	if string(b) != "abcdef" {
+		t.Fatalf("unexpected object %q", string(b))
 	}
 }
