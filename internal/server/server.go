@@ -27,6 +27,9 @@ type metrics struct {
 func Run(cfg config.Config) error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	store := storage.New(cfg.DataDir)
+	if cfg.ReplicationMode == "local_mirror" && cfg.ReplicationDir != "" {
+		store.EnableReplication(cfg.ReplicationDir)
+	}
 
 	auditLog, err := audit.New(cfg.AuditLogPath)
 	if err != nil {

@@ -17,6 +17,8 @@ type Config struct {
 	StrictMode           bool   `json:"strict_mode"`
 	AuditLogPath         string `json:"audit_log_path"`
 	MultipartMaxAgeHours int    `json:"multipart_max_age_hours"`
+	ReplicationMode      string `json:"replication_mode"`
+	ReplicationDir       string `json:"replication_dir"`
 }
 
 func Default(dataDir string) Config {
@@ -28,6 +30,8 @@ func Default(dataDir string) Config {
 		StrictMode:           false,
 		AuditLogPath:         filepath.Join(dataDir, "audit.log"),
 		MultipartMaxAgeHours: 24,
+		ReplicationMode:      "none",
+		ReplicationDir:       "",
 	}
 }
 
@@ -48,6 +52,9 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.MultipartMaxAgeHours <= 0 {
 		cfg.MultipartMaxAgeHours = 24
+	}
+	if cfg.ReplicationMode == "" {
+		cfg.ReplicationMode = "none"
 	}
 	if cfg.StrictMode {
 		if cfg.AdminSecretKey == "" || cfg.AdminSecretKey == "sssadmin-secret-change-me" {

@@ -51,8 +51,9 @@ type ObjectBackend interface {
 }
 
 type Store struct {
-	meta    MetadataStore
-	objects ObjectBackend
+	meta           MetadataStore
+	objects        ObjectBackend
+	replicationDir string
 }
 
 func New(root string) *Store {
@@ -61,6 +62,10 @@ func New(root string) *Store {
 		meta:    newFSMetadataStore(base),
 		objects: newFSObjectBackend(base),
 	}
+}
+
+func (s *Store) EnableReplication(dir string) {
+	s.replicationDir = dir
 }
 
 func NewWithBackends(meta MetadataStore, objects ObjectBackend) *Store {
@@ -73,6 +78,17 @@ func (s *Store) DeleteBucket(bucket string) error         { return s.meta.Delete
 func (s *Store) ListBuckets() ([]BucketInfo, error)       { return s.meta.ListBuckets() }
 
 func (s *Store) PutObject(bucket, key string, r io.Reader) (ObjectInfo, error) {
+	enabled, err := s.GetBucketVersioning(bucket)
+	if err != nil && !errors.Is(err, ErrBucketNotFound) {
+		return ObjectInfo{}, err
+	}
+	if enabled {
+		info, _, err := s.putObjectVersioned(bucket, key, r)
+		if err == nil {
+			s.replicatePut(bucket, key)
+		}
+		return info, err
+	}
 	info, err := s.objects.PutObject(bucket, key, r)
 	if err != nil {
 		return ObjectInfo{}, err
@@ -80,10 +96,18 @@ func (s *Store) PutObject(bucket, key string, r io.Reader) (ObjectInfo, error) {
 	if err := s.meta.PutObjectMeta(bucket, key, info.ETag); err != nil {
 		return ObjectInfo{}, err
 	}
+	s.replicatePut(bucket, key)
 	return info, nil
 }
 
 func (s *Store) GetObject(bucket, key string) (io.ReadCloser, ObjectInfo, error) {
+	enabled, err := s.GetBucketVersioning(bucket)
+	if err != nil && !errors.Is(err, ErrBucketNotFound) {
+		return nil, ObjectInfo{}, err
+	}
+	if enabled {
+		return s.GetObjectVersion(bucket, key, "")
+	}
 	rc, info, err := s.objects.GetObject(bucket, key)
 	if err != nil {
 		return nil, ObjectInfo{}, err
@@ -96,14 +120,45 @@ func (s *Store) GetObject(bucket, key string) (io.ReadCloser, ObjectInfo, error)
 }
 
 func (s *Store) DeleteObject(bucket, key string) error {
+	enabled, err := s.GetBucketVersioning(bucket)
+	if err != nil && !errors.Is(err, ErrBucketNotFound) {
+		return err
+	}
+	if enabled {
+		return s.DeleteObjectVersion(bucket, key, "")
+	}
 	if err := s.objects.DeleteObject(bucket, key); err != nil {
 		return err
 	}
 	_ = s.meta.DeleteObjectMeta(bucket, key)
+	s.replicateDelete(bucket, key)
 	return nil
 }
 
 func (s *Store) ListObjectsV2(bucket, prefix, continuationToken string, maxKeys int) ([]ObjectInfo, string, bool, error) {
+	enabled, err := s.GetBucketVersioning(bucket)
+	if err != nil && !errors.Is(err, ErrBucketNotFound) {
+		return nil, "", false, err
+	}
+	if enabled {
+		vers, err := s.ListObjectVersions(bucket, prefix, maxKeys)
+		if err != nil {
+			return nil, "", false, err
+		}
+		objs := make([]ObjectInfo, 0, len(vers))
+		seen := map[string]struct{}{}
+		for _, v := range vers {
+			if !v.IsLatest || v.DeleteMarker {
+				continue
+			}
+			if _, ok := seen[v.Key]; ok {
+				continue
+			}
+			seen[v.Key] = struct{}{}
+			objs = append(objs, ObjectInfo{Key: v.Key, Size: v.Size, LastModified: v.LastModified, ETag: v.ETag})
+		}
+		return objs, "", false, nil
+	}
 	objs, next, truncated, err := s.objects.ListObjects(bucket, prefix, continuationToken, maxKeys)
 	if err != nil {
 		return nil, "", false, err
@@ -115,6 +170,40 @@ func (s *Store) ListObjectsV2(bucket, prefix, continuationToken string, maxKeys 
 		}
 	}
 	return objs, next, truncated, nil
+}
+
+func (s *Store) replicatePut(bucket, key string) {
+	if s.replicationDir == "" {
+		return
+	}
+	rc, _, err := s.GetObjectVersion(bucket, key, "")
+	if err != nil {
+		return
+	}
+	defer rc.Close()
+	clean, ok := cleanKey(key)
+	if !ok {
+		return
+	}
+	p := filepath.Join(s.replicationDir, bucket, clean)
+	_ = os.MkdirAll(filepath.Dir(p), 0o755)
+	f, err := os.Create(p)
+	if err != nil {
+		return
+	}
+	_, _ = io.Copy(f, rc)
+	_ = f.Close()
+}
+
+func (s *Store) replicateDelete(bucket, key string) {
+	if s.replicationDir == "" {
+		return
+	}
+	clean, ok := cleanKey(key)
+	if !ok {
+		return
+	}
+	_ = os.Remove(filepath.Join(s.replicationDir, bucket, clean))
 }
 
 // ---- Local filesystem implementations ----

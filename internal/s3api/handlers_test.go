@@ -169,3 +169,44 @@ func TestMultipartFlow(t *testing.T) {
 		t.Fatalf("expected merged object, got %q", string(b2))
 	}
 }
+
+func TestVersioningFlow(t *testing.T) {
+	tmp := t.TempDir()
+	h := New(storage.New(tmp), auth.NewStaticAuthenticator([]string{"testkey"}))
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	_, _ = http.DefaultClient.Do(authedReq(http.MethodPut, ts.URL+"/verbucket", "", "testkey"))
+	vxml := `<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>`
+	resp, err := http.DefaultClient.Do(authedReq(http.MethodPut, ts.URL+"/verbucket?versioning", vxml, "testkey"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("enable versioning status=%d", resp.StatusCode)
+	}
+
+	_, _ = http.DefaultClient.Do(authedReq(http.MethodPut, ts.URL+"/verbucket/file.txt", "one", "testkey"))
+	_, _ = http.DefaultClient.Do(authedReq(http.MethodPut, ts.URL+"/verbucket/file.txt", "two", "testkey"))
+
+	resp, err = http.DefaultClient.Do(authedReq(http.MethodGet, ts.URL+"/verbucket?versions", "", "testkey"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(b), "<VersionID>") {
+		t.Fatalf("expected versions listing, got %s", string(b))
+	}
+
+	_, _ = http.DefaultClient.Do(authedReq(http.MethodDelete, ts.URL+"/verbucket/file.txt", "", "testkey"))
+	resp, err = http.DefaultClient.Do(authedReq(http.MethodGet, ts.URL+"/verbucket/file.txt", "", "testkey"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected not found after delete marker, got %d", resp.StatusCode)
+	}
+}

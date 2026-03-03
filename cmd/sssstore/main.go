@@ -8,6 +8,7 @@ import (
 
 	"github.com/sssstore/sssstore/internal/config"
 	"github.com/sssstore/sssstore/internal/server"
+	"github.com/sssstore/sssstore/internal/storage"
 )
 
 func main() {
@@ -66,6 +67,8 @@ func serverCmd(args []string) {
 func doctorCmd(args []string) {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
 	cfgPath := fs.String("config", "./sssstore.json", "Path to config file")
+	scrub := fs.Bool("scrub", false, "Run scrub check")
+	repair := fs.Bool("repair", false, "Repair issues found by scrub")
 	_ = fs.Parse(args)
 
 	cfg, err := config.Load(*cfgPath)
@@ -81,6 +84,14 @@ func doctorCmd(args []string) {
 	}
 	fmt.Println("doctor: ok")
 	fmt.Printf("data_dir=%s\n", cfg.DataDir)
+	if *scrub {
+		st := storage.New(cfg.DataDir)
+		report, err := st.Scrub(*repair)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("scrub checked=%d missing_meta=%d orphan_meta=%d repair=%v\n", report.CheckedObjects, report.MissingMeta, report.OrphanMeta, *repair)
+	}
 }
 
 func userCmd(args []string) {

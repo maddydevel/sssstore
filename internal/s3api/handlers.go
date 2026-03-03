@@ -58,17 +58,29 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) routeBucket(w http.ResponseWriter, r *http.Request, bucket string) {
 	switch r.Method {
 	case http.MethodPut:
+		if _, ok := r.URL.Query()["versioning"]; ok {
+			h.putBucketVersioning(w, r, bucket)
+			return
+		}
 		h.createBucket(w, bucket)
 	case http.MethodDelete:
 		h.deleteBucket(w, bucket)
 	case http.MethodHead:
 		h.headBucket(w, bucket)
 	case http.MethodGet:
+		if _, ok := r.URL.Query()["versioning"]; ok {
+			h.getBucketVersioning(w, bucket)
+			return
+		}
+		if _, ok := r.URL.Query()["versions"]; ok {
+			h.listObjectVersions(w, bucket, r.URL.Query().Get("prefix"), r.URL.Query().Get("max-keys"))
+			return
+		}
 		if r.URL.Query().Get("list-type") == "2" {
 			h.listObjectsV2(w, bucket, r.URL.Query().Get("prefix"), r.URL.Query().Get("max-keys"), r.URL.Query().Get("continuation-token"))
 			return
 		}
-		h.writeError(w, http.StatusNotImplemented, "NotImplemented", "only list-type=2 is supported for bucket GET")
+		h.writeError(w, http.StatusNotImplemented, "NotImplemented", "only list-type=2, versioning, and versions are supported for bucket GET")
 	default:
 		h.writeError(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "unsupported method")
 	}
@@ -96,13 +108,13 @@ func (h *Handler) routeObject(w http.ResponseWriter, r *http.Request, bucket, ke
 	case http.MethodGet:
 		h.getObject(w, r, bucket, key)
 	case http.MethodHead:
-		h.headObject(w, bucket, key)
+		h.headObject(w, bucket, key, q.Get("versionId"))
 	case http.MethodDelete:
 		if q.Get("uploadId") != "" {
 			h.abortMultipartUpload(w, bucket, q.Get("uploadId"))
 			return
 		}
-		h.deleteObject(w, bucket, key)
+		h.deleteObject(w, bucket, key, q.Get("versionId"))
 	default:
 		h.writeError(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "unsupported method")
 	}
@@ -231,6 +243,67 @@ func (h *Handler) headBucket(w http.ResponseWriter, bucket string) {
 	w.WriteHeader(http.StatusOK)
 }
 
+type VersioningConfiguration struct {
+	XMLName xml.Name `xml:"VersioningConfiguration"`
+	Status  string   `xml:"Status,omitempty"`
+}
+
+func (h *Handler) getBucketVersioning(w http.ResponseWriter, bucket string) {
+	enabled, err := h.store.GetBucketVersioning(bucket)
+	if errors.Is(err, storage.ErrBucketNotFound) {
+		h.writeError(w, http.StatusNotFound, "NoSuchBucket", err.Error())
+		return
+	}
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	status := ""
+	if enabled {
+		status = "Enabled"
+	}
+	h.writeXML(w, http.StatusOK, VersioningConfiguration{Status: status})
+}
+
+func (h *Handler) putBucketVersioning(w http.ResponseWriter, r *http.Request, bucket string) {
+	var cfg VersioningConfiguration
+	if err := xml.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		h.writeError(w, http.StatusBadRequest, "MalformedXML", err.Error())
+		return
+	}
+	enabled := strings.EqualFold(cfg.Status, "Enabled")
+	if err := h.store.SetBucketVersioning(bucket, enabled); err != nil {
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			h.writeError(w, http.StatusNotFound, "NoSuchBucket", err.Error())
+			return
+		}
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+type ListVersionsResult struct {
+	XMLName  xml.Name                    `xml:"ListVersionsResult"`
+	Name     string                      `xml:"Name"`
+	Prefix   string                      `xml:"Prefix"`
+	Versions []storage.ObjectVersionInfo `xml:"Version"`
+}
+
+func (h *Handler) listObjectVersions(w http.ResponseWriter, bucket, prefix, maxKeysRaw string) {
+	maxKeys, _ := strconv.Atoi(maxKeysRaw)
+	versions, err := h.store.ListObjectVersions(bucket, prefix, maxKeys)
+	if errors.Is(err, storage.ErrBucketNotFound) {
+		h.writeError(w, http.StatusNotFound, "NoSuchBucket", err.Error())
+		return
+	}
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	h.writeXML(w, http.StatusOK, ListVersionsResult{Name: bucket, Prefix: prefix, Versions: versions})
+}
+
 type ListBucketResult struct {
 	XMLName           xml.Name      `xml:"ListBucketResult"`
 	XMLNS             string        `xml:"xmlns,attr"`
@@ -309,7 +382,7 @@ func parseRange(hdr string, size int64) (start, end int64, ok bool) {
 	return s, e, true
 }
 func (h *Handler) getObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
-	rc, info, err := h.store.GetObject(bucket, key)
+	rc, info, err := h.store.GetObjectVersion(bucket, key, r.URL.Query().Get("versionId"))
 	if errors.Is(err, storage.ErrObjectNotFound) {
 		h.writeError(w, http.StatusNotFound, "NoSuchKey", err.Error())
 		return
@@ -343,8 +416,8 @@ func (h *Handler) getObject(w http.ResponseWriter, r *http.Request, bucket, key 
 	}
 	_, _ = io.Copy(w, rc)
 }
-func (h *Handler) headObject(w http.ResponseWriter, bucket, key string) {
-	rc, info, err := h.store.GetObject(bucket, key)
+func (h *Handler) headObject(w http.ResponseWriter, bucket, key, versionID string) {
+	rc, info, err := h.store.GetObjectVersion(bucket, key, versionID)
 	if rc != nil {
 		_ = rc.Close()
 	}
@@ -363,8 +436,8 @@ func (h *Handler) headObject(w http.ResponseWriter, bucket, key string) {
 	}
 	w.WriteHeader(http.StatusOK)
 }
-func (h *Handler) deleteObject(w http.ResponseWriter, bucket, key string) {
-	err := h.store.DeleteObject(bucket, key)
+func (h *Handler) deleteObject(w http.ResponseWriter, bucket, key, versionID string) {
+	err := h.store.DeleteObjectVersion(bucket, key, versionID)
 	if err != nil && !errors.Is(err, storage.ErrObjectNotFound) {
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return

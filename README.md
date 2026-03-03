@@ -10,47 +10,22 @@ go run ./cmd/sssstore user create --config ./sssstore.json --name ci --access-ke
 go run ./cmd/sssstore server --config ./sssstore.json
 ```
 
-Server defaults to `:9000`.
+## Phase 3 baseline features
 
-## Supported APIs (Phase 2 baseline)
+- Bucket/object APIs, `ListObjectsV2`, range GET, multipart upload.
+- Bucket versioning controls:
+  - `PUT /{bucket}?versioning`
+  - `GET /{bucket}?versioning`
+  - `GET /{bucket}?versions`
+- Version-aware object operations via `versionId` query for GET/HEAD/DELETE.
+- SigV4-style access-key auth scaffold (`Credential=<access-key>/...`).
+- JSON structured logs + audit log file (`audit_log_path`).
+- Lifecycle worker for stale multipart cleanup (`multipart_max_age_hours`).
+- Local mirror replication beta (`replication_mode=local_mirror`, `replication_dir`).
+- `sssstore doctor --scrub [--repair]` scrub/repair workflow.
 
-- Bucket: create, head, delete, list buckets
-- Objects: put/get/head/delete
-- Range GET support (`Range: bytes=start-end`)
-- ListObjectsV2 (`?list-type=2`) with continuation token support
-- Multipart upload:
-  - `POST /{bucket}/{key}?uploads`
-  - `PUT /{bucket}/{key}?partNumber=N&uploadId=...`
-  - `POST /{bucket}/{key}?uploadId=...`
-  - `DELETE /{bucket}/{key}?uploadId=...`
-- ETag persistence for uploaded objects
+## Security and operability config
 
-## Security and auth
-
-- S3 endpoints require an `Authorization` header with SigV4-like credential scope.
-- Access keys are validated from `Credential=<access-key>/...` against:
-  - `admin_access_key` in config
-  - users created with `sssstore user create`
-- `strict_mode` support in config:
-  - requires non-default `admin_secret_key`
-  - enforces TLS cert/key pair consistency
-
-## Operability
-
-- `GET /healthz`
-- `GET /readyz`
-- `GET /metrics`
-- JSON structured server logs (`log/slog`)
-- JSON audit log file (`audit_log_path`)
-- Lifecycle worker cleans stale multipart uploads older than `multipart_max_age_hours`
-
-## CLI commands
-
-- `sssstore init`
-- `sssstore server`
-- `sssstore doctor` (basic data directory checks)
-- `sssstore user create` (basic admin bootstrap)
-
-## Notes
-
-This MVP focuses on local filesystem storage and baseline S3 path-style operations.
+- `strict_mode` enforces non-default admin secret and TLS cert/key pairing.
+- TLS enabled when `tls_cert_file` + `tls_key_file` are both configured.
+- Endpoints: `/healthz`, `/readyz`, `/metrics`.

@@ -111,3 +111,33 @@ func TestCleanupStaleMultipartUploads(t *testing.T) {
 		t.Fatalf("expected stale uploads removal, got %d", removed)
 	}
 }
+
+func TestVersioningLifecycle(t *testing.T) {
+	tmp := t.TempDir()
+	s := New(tmp)
+	if err := s.CreateBucket("v-bucket"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetBucketVersioning("v-bucket", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutObject("v-bucket", "k.txt", strings.NewReader("one")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutObject("v-bucket", "k.txt", strings.NewReader("two")); err != nil {
+		t.Fatal(err)
+	}
+	versions, err := s.ListObjectVersions("v-bucket", "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) < 2 {
+		t.Fatalf("expected at least 2 versions, got %d", len(versions))
+	}
+	if err := s.DeleteObject("v-bucket", "k.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.GetObject("v-bucket", "k.txt"); err == nil {
+		t.Fatal("expected not found due to delete marker")
+	}
+}
