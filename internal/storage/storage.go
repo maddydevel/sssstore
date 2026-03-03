@@ -31,21 +31,230 @@ type BucketInfo struct {
 	CreationDate time.Time
 }
 
+// MetadataStore abstracts bucket/object metadata concerns.
+type MetadataStore interface {
+	ListBuckets() ([]BucketInfo, error)
+	BucketExists(bucket string) (bool, error)
+	CreateBucket(bucket string) error
+	DeleteBucket(bucket string) error
+	PutObjectMeta(bucket, key, etag string) error
+	GetObjectMeta(bucket, key string) (etag string, _ error)
+	DeleteObjectMeta(bucket, key string) error
+}
+
+// ObjectBackend abstracts object data persistence.
+type ObjectBackend interface {
+	PutObject(bucket, key string, r io.Reader) (ObjectInfo, error)
+	GetObject(bucket, key string) (io.ReadCloser, ObjectInfo, error)
+	DeleteObject(bucket, key string) error
+	ListObjects(bucket, prefix, continuationToken string, maxKeys int) ([]ObjectInfo, string, bool, error)
+}
+
+type Store struct {
+	meta    MetadataStore
+	objects ObjectBackend
+}
+
+func New(root string) *Store {
+	base := filepath.Join(root, "buckets")
+	return &Store{
+		meta:    newFSMetadataStore(base),
+		objects: newFSObjectBackend(base),
+	}
+}
+
+func NewWithBackends(meta MetadataStore, objects ObjectBackend) *Store {
+	return &Store{meta: meta, objects: objects}
+}
+
+func (s *Store) BucketExists(bucket string) (bool, error) { return s.meta.BucketExists(bucket) }
+func (s *Store) CreateBucket(bucket string) error         { return s.meta.CreateBucket(bucket) }
+func (s *Store) DeleteBucket(bucket string) error         { return s.meta.DeleteBucket(bucket) }
+func (s *Store) ListBuckets() ([]BucketInfo, error)       { return s.meta.ListBuckets() }
+
+func (s *Store) PutObject(bucket, key string, r io.Reader) (ObjectInfo, error) {
+	info, err := s.objects.PutObject(bucket, key, r)
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	if err := s.meta.PutObjectMeta(bucket, key, info.ETag); err != nil {
+		return ObjectInfo{}, err
+	}
+	return info, nil
+}
+
+func (s *Store) GetObject(bucket, key string) (io.ReadCloser, ObjectInfo, error) {
+	rc, info, err := s.objects.GetObject(bucket, key)
+	if err != nil {
+		return nil, ObjectInfo{}, err
+	}
+	etag, err := s.meta.GetObjectMeta(bucket, key)
+	if err == nil {
+		info.ETag = etag
+	}
+	return rc, info, nil
+}
+
+func (s *Store) DeleteObject(bucket, key string) error {
+	if err := s.objects.DeleteObject(bucket, key); err != nil {
+		return err
+	}
+	_ = s.meta.DeleteObjectMeta(bucket, key)
+	return nil
+}
+
+func (s *Store) ListObjectsV2(bucket, prefix, continuationToken string, maxKeys int) ([]ObjectInfo, string, bool, error) {
+	objs, next, truncated, err := s.objects.ListObjects(bucket, prefix, continuationToken, maxKeys)
+	if err != nil {
+		return nil, "", false, err
+	}
+	for i := range objs {
+		etag, err := s.meta.GetObjectMeta(bucket, objs[i].Key)
+		if err == nil {
+			objs[i].ETag = etag
+		}
+	}
+	return objs, next, truncated, nil
+}
+
+// ---- Local filesystem implementations ----
+
+type fsMetadataStore struct {
+	root string
+}
+
 type objectMeta struct {
 	ETag string `json:"etag"`
 }
 
-type Store struct {
+func newFSMetadataStore(root string) *fsMetadataStore { return &fsMetadataStore{root: root} }
+
+func (m *fsMetadataStore) bucketDir(bucket string) string { return filepath.Join(m.root, bucket) }
+func (m *fsMetadataStore) objectsDir(bucket string) string {
+	return filepath.Join(m.bucketDir(bucket), "objects")
+}
+
+func (m *fsMetadataStore) ListBuckets() ([]BucketInfo, error) {
+	if err := os.MkdirAll(m.root, 0o755); err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(m.root)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]BucketInfo, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		st, err := os.Stat(filepath.Join(m.root, e.Name()))
+		if err != nil {
+			continue
+		}
+		out = append(out, BucketInfo{Name: e.Name(), CreationDate: st.ModTime().UTC()})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func (m *fsMetadataStore) BucketExists(bucket string) (bool, error) {
+	st, err := os.Stat(m.objectsDir(bucket))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return st.IsDir(), nil
+}
+
+func (m *fsMetadataStore) CreateBucket(bucket string) error {
+	if !validateBucket(bucket) {
+		return errors.New("invalid bucket name")
+	}
+	return os.MkdirAll(m.objectsDir(bucket), 0o755)
+}
+
+func (m *fsMetadataStore) DeleteBucket(bucket string) error {
+	objDir := m.objectsDir(bucket)
+	if _, err := os.Stat(objDir); err != nil {
+		if os.IsNotExist(err) {
+			return ErrBucketNotFound
+		}
+		return err
+	}
+	hasFiles := false
+	err := filepath.Walk(objDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && !strings.HasSuffix(path, ".meta.json") {
+			hasFiles = true
+			return io.EOF
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	if hasFiles {
+		return ErrBucketNotEmpty
+	}
+	return os.RemoveAll(m.bucketDir(bucket))
+}
+
+func metaPath(path string) string { return path + ".meta.json" }
+
+func (m *fsMetadataStore) PutObjectMeta(bucket, key, etag string) error {
+	clean, ok := cleanKey(key)
+	if !ok {
+		return ErrObjectNotFound
+	}
+	p := filepath.Join(m.objectsDir(bucket), clean)
+	b, err := json.Marshal(objectMeta{ETag: etag})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(metaPath(p), b, 0o644)
+}
+
+func (m *fsMetadataStore) GetObjectMeta(bucket, key string) (string, error) {
+	clean, ok := cleanKey(key)
+	if !ok {
+		return "", ErrObjectNotFound
+	}
+	p := filepath.Join(m.objectsDir(bucket), clean)
+	b, err := os.ReadFile(metaPath(p))
+	if err != nil {
+		return "", err
+	}
+	var om objectMeta
+	if err := json.Unmarshal(b, &om); err != nil {
+		return "", err
+	}
+	return om.ETag, nil
+}
+
+func (m *fsMetadataStore) DeleteObjectMeta(bucket, key string) error {
+	clean, ok := cleanKey(key)
+	if !ok {
+		return ErrObjectNotFound
+	}
+	p := filepath.Join(m.objectsDir(bucket), clean)
+	if err := os.Remove(metaPath(p)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+type fsObjectBackend struct {
 	root string
 }
 
-func New(root string) *Store {
-	return &Store{root: filepath.Join(root, "buckets")}
-}
+func newFSObjectBackend(root string) *fsObjectBackend { return &fsObjectBackend{root: root} }
 
-func (s *Store) bucketDir(bucket string) string { return filepath.Join(s.root, bucket) }
-func (s *Store) objectsDir(bucket string) string {
-	return filepath.Join(s.bucketDir(bucket), "objects")
+func (b *fsObjectBackend) objectsDir(bucket string) string {
+	return filepath.Join(b.root, bucket, "objects")
 }
 
 func sanitizeSegment(seg string) bool {
@@ -75,111 +284,18 @@ func cleanKey(key string) (string, bool) {
 	return filepath.Join(parts...), true
 }
 
-func (s *Store) BucketExists(bucket string) (bool, error) {
-	st, err := os.Stat(s.objectsDir(bucket))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	return st.IsDir(), nil
-}
-
-func (s *Store) CreateBucket(bucket string) error {
-	if !validateBucket(bucket) {
-		return errors.New("invalid bucket name")
-	}
-	return os.MkdirAll(s.objectsDir(bucket), 0o755)
-}
-
-func (s *Store) DeleteBucket(bucket string) error {
-	objDir := s.objectsDir(bucket)
-	if _, err := os.Stat(objDir); err != nil {
-		if os.IsNotExist(err) {
-			return ErrBucketNotFound
-		}
-		return err
-	}
-	hasFiles := false
-	err := filepath.Walk(objDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() && !strings.HasSuffix(path, ".meta.json") {
-			hasFiles = true
-			return io.EOF
-		}
-		return nil
-	})
-	if err != nil && !errors.Is(err, io.EOF) {
-		return err
-	}
-	if hasFiles {
-		return ErrBucketNotEmpty
-	}
-	return os.RemoveAll(s.bucketDir(bucket))
-}
-
-func (s *Store) ListBuckets() ([]BucketInfo, error) {
-	if err := os.MkdirAll(s.root, 0o755); err != nil {
-		return nil, err
-	}
-	entries, err := os.ReadDir(s.root)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]BucketInfo, 0, len(entries))
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		st, err := os.Stat(filepath.Join(s.root, e.Name()))
-		if err != nil {
-			continue
-		}
-		out = append(out, BucketInfo{Name: e.Name(), CreationDate: st.ModTime().UTC()})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, nil
-}
-
-func metaPath(path string) string {
-	return path + ".meta.json"
-}
-
-func writeMeta(path string, info ObjectInfo) error {
-	b, err := json.Marshal(objectMeta{ETag: info.ETag})
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(metaPath(path), b, 0o644)
-}
-
-func readMeta(path string) objectMeta {
-	b, err := os.ReadFile(metaPath(path))
-	if err != nil {
-		return objectMeta{}
-	}
-	var m objectMeta
-	if json.Unmarshal(b, &m) != nil {
-		return objectMeta{}
-	}
-	return m
-}
-
-func (s *Store) PutObject(bucket, key string, r io.Reader) (ObjectInfo, error) {
+func (b *fsObjectBackend) PutObject(bucket, key string, r io.Reader) (ObjectInfo, error) {
 	clean, ok := cleanKey(key)
 	if !ok {
 		return ObjectInfo{}, errors.New("invalid key")
 	}
-	if _, err := os.Stat(s.objectsDir(bucket)); err != nil {
+	if _, err := os.Stat(b.objectsDir(bucket)); err != nil {
 		if os.IsNotExist(err) {
 			return ObjectInfo{}, ErrBucketNotFound
 		}
 		return ObjectInfo{}, err
 	}
-	p := filepath.Join(s.objectsDir(bucket), clean)
+	p := filepath.Join(b.objectsDir(bucket), clean)
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return ObjectInfo{}, err
 	}
@@ -194,19 +310,15 @@ func (s *Store) PutObject(bucket, key string, r io.Reader) (ObjectInfo, error) {
 		return ObjectInfo{}, err
 	}
 	st, _ := f.Stat()
-	info := ObjectInfo{Key: key, Size: n, LastModified: st.ModTime().UTC(), ETag: `"` + hex.EncodeToString(h.Sum(nil)) + `"`}
-	if err := writeMeta(p, info); err != nil {
-		return ObjectInfo{}, err
-	}
-	return info, nil
+	return ObjectInfo{Key: key, Size: n, LastModified: st.ModTime().UTC(), ETag: `"` + hex.EncodeToString(h.Sum(nil)) + `"`}, nil
 }
 
-func (s *Store) GetObject(bucket, key string) (io.ReadCloser, ObjectInfo, error) {
+func (b *fsObjectBackend) GetObject(bucket, key string) (io.ReadCloser, ObjectInfo, error) {
 	clean, ok := cleanKey(key)
 	if !ok {
 		return nil, ObjectInfo{}, ErrObjectNotFound
 	}
-	p := filepath.Join(s.objectsDir(bucket), clean)
+	p := filepath.Join(b.objectsDir(bucket), clean)
 	f, err := os.Open(p)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -216,31 +328,29 @@ func (s *Store) GetObject(bucket, key string) (io.ReadCloser, ObjectInfo, error)
 	}
 	st, err := f.Stat()
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, ObjectInfo{}, err
 	}
-	m := readMeta(p)
-	return f, ObjectInfo{Key: key, Size: st.Size(), LastModified: st.ModTime().UTC(), ETag: m.ETag}, nil
+	return f, ObjectInfo{Key: key, Size: st.Size(), LastModified: st.ModTime().UTC()}, nil
 }
 
-func (s *Store) DeleteObject(bucket, key string) error {
+func (b *fsObjectBackend) DeleteObject(bucket, key string) error {
 	clean, ok := cleanKey(key)
 	if !ok {
 		return ErrObjectNotFound
 	}
-	p := filepath.Join(s.objectsDir(bucket), clean)
+	p := filepath.Join(b.objectsDir(bucket), clean)
 	if err := os.Remove(p); err != nil {
 		if os.IsNotExist(err) {
 			return ErrObjectNotFound
 		}
 		return err
 	}
-	_ = os.Remove(metaPath(p))
 	return nil
 }
 
-func (s *Store) ListObjectsV2(bucket, prefix, continuationToken string, maxKeys int) ([]ObjectInfo, string, bool, error) {
-	root := s.objectsDir(bucket)
+func (b *fsObjectBackend) ListObjects(bucket, prefix, continuationToken string, maxKeys int) ([]ObjectInfo, string, bool, error) {
+	root := b.objectsDir(bucket)
 	if _, err := os.Stat(root); err != nil {
 		if os.IsNotExist(err) {
 			return nil, "", false, ErrBucketNotFound
@@ -269,8 +379,7 @@ func (s *Store) ListObjectsV2(bucket, prefix, continuationToken string, maxKeys 
 		if continuationToken != "" && key <= continuationToken {
 			return nil
 		}
-		m := readMeta(path)
-		all = append(all, ObjectInfo{Key: key, Size: info.Size(), LastModified: info.ModTime().UTC(), ETag: m.ETag})
+		all = append(all, ObjectInfo{Key: key, Size: info.Size(), LastModified: info.ModTime().UTC()})
 		return nil
 	})
 	if err != nil {

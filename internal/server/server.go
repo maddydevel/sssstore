@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,11 +22,12 @@ type metrics struct {
 }
 
 func Run(bindAddr, dataDir string) error {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	store := storage.New(dataDir)
 	s3 := s3api.New(store)
 	m := &metrics{}
 
-	handler := loggingMiddleware(m, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := loggingMiddleware(logger, m, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/healthz", "/readyz":
 			w.Header().Set("Content-Type", "application/json")
@@ -46,7 +47,7 @@ func Run(bindAddr, dataDir string) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("sssstore listening on %s", bindAddr)
+		logger.Info("sssstore listening", "addr", bindAddr)
 		errCh <- srv.ListenAndServe()
 	}()
 
@@ -55,7 +56,7 @@ func Run(bindAddr, dataDir string) error {
 
 	select {
 	case sig := <-sigCh:
-		log.Printf("received signal: %s; shutting down", sig)
+		logger.Info("received signal; shutting down", "signal", sig.String())
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		return srv.Shutdown(ctx)
@@ -77,7 +78,7 @@ func (w *captureWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
-func loggingMiddleware(m *metrics, next http.Handler) http.Handler {
+func loggingMiddleware(logger *slog.Logger, m *metrics, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		cw := &captureWriter{ResponseWriter: w, status: http.StatusOK}
@@ -86,6 +87,12 @@ func loggingMiddleware(m *metrics, next http.Handler) http.Handler {
 		if cw.status >= 400 {
 			atomic.AddUint64(&m.errors, 1)
 		}
-		log.Printf("method=%s path=%s status=%d remote=%s duration=%s", r.Method, r.URL.Path, cw.status, r.RemoteAddr, time.Since(start))
+		logger.Info("http request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", cw.status,
+			"remote", r.RemoteAddr,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
 	})
 }

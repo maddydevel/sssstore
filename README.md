@@ -38,3 +38,12 @@ This is an MVP implementation focused on local filesystem storage and baseline S
 ## Next steps
 
 See [ENHANCEMENTS.md](./ENHANCEMENTS.md) for a prioritized feature enhancement backlog beyond the MVP.
+
+
+## Foundations status (Phase 0)
+
+- Project skeleton with module boundaries (`cmd/`, `internal/`).
+- Config loader/initializer in `internal/config`.
+- Basic HTTP server with `/healthz`, `/readyz`, and `/metrics`.
+- Structured JSON request logs (`log/slog`).
+- Local metadata/object store abstractions via `MetadataStore` and `ObjectBackend` interfaces in `internal/storage`.
