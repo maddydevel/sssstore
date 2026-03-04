@@ -2,6 +2,8 @@ package storage
 
 import (
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -139,5 +141,62 @@ func TestVersioningLifecycle(t *testing.T) {
 	}
 	if _, _, err := s.GetObject("v-bucket", "k.txt"); err == nil {
 		t.Fatal("expected not found due to delete marker")
+	}
+}
+
+func TestScrubRepairRebuildsMissingMeta(t *testing.T) {
+	tmp := t.TempDir()
+	s := New(tmp)
+	if err := s.CreateBucket("scrub-bucket"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutObject("scrub-bucket", "a.txt", strings.NewReader("alpha")); err != nil {
+		t.Fatal(err)
+	}
+	root, _ := s.fsRoot()
+	meta := filepath.Join(root, "scrub-bucket", "objects", "a.txt.meta.json")
+	if err := os.Remove(meta); err != nil {
+		t.Fatal(err)
+	}
+	report, err := s.Scrub(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.MissingMeta < 1 {
+		t.Fatalf("expected missing meta detection, got %+v", report)
+	}
+	_, info, err := s.GetObject("scrub-bucket", "a.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.ETag == "" {
+		t.Fatal("expected etag to be rebuilt")
+	}
+}
+
+func TestScrubRepairRemovesOrphanMeta(t *testing.T) {
+	tmp := t.TempDir()
+	s := New(tmp)
+	if err := s.CreateBucket("orphan-bucket"); err != nil {
+		t.Fatal(err)
+	}
+	root, _ := s.fsRoot()
+	objDir := filepath.Join(root, "orphan-bucket", "objects")
+	if err := os.MkdirAll(objDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orphan := filepath.Join(objDir, "ghost.txt.meta.json")
+	if err := os.WriteFile(orphan, []byte(`{"etag":"\"x\""}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	report, err := s.Scrub(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.OrphanMeta < 1 {
+		t.Fatalf("expected orphan meta detection, got %+v", report)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("expected orphan meta removed, err=%v", err)
 	}
 }

@@ -1,6 +1,10 @@
 package storage
 
 import (
+	"crypto/md5"
+	"encoding/hex"
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +26,9 @@ func (s *Store) Scrub(repair bool) (ScrubReport, error) {
 		if err != nil || info.IsDir() {
 			return nil
 		}
-		if strings.HasSuffix(path, ".meta.json") {
+		norm := filepath.ToSlash(path)
+
+		if strings.HasSuffix(norm, ".meta.json") {
 			obj := strings.TrimSuffix(path, ".meta.json")
 			if _, err := os.Stat(obj); err != nil {
 				report.OrphanMeta++
@@ -32,34 +38,46 @@ func (s *Store) Scrub(repair bool) (ScrubReport, error) {
 			}
 			return nil
 		}
-		if strings.Contains(path, "/versions/") && strings.HasSuffix(path, ".data") {
+
+		// Only scrub primary object files under /objects/; skip multipart/versioning internals.
+		if !strings.Contains(norm, "/objects/") {
 			return nil
 		}
+
 		report.CheckedObjects++
-		if _, err := os.Stat(path + ".meta.json"); err != nil {
-			report.MissingMeta++
-			if repair {
-				_ = s.meta.PutObjectMeta(bucketFromPath(root, path), keyFromPath(path), "")
-			}
+		metaPath := path + ".meta.json"
+		if _, err := os.Stat(metaPath); err == nil {
+			return nil
 		}
+
+		report.MissingMeta++
+		if !repair {
+			return nil
+		}
+
+		etag, err := computeFileETag(path)
+		if err != nil {
+			return nil
+		}
+		b, err := json.Marshal(objectMeta{ETag: etag})
+		if err != nil {
+			return nil
+		}
+		_ = os.WriteFile(metaPath, b, 0o644)
 		return nil
 	})
 	return report, err
 }
 
-func bucketFromPath(root, p string) string {
-	rel, _ := filepath.Rel(root, p)
-	parts := strings.Split(filepath.ToSlash(rel), "/")
-	if len(parts) > 0 {
-		return parts[0]
+func computeFileETag(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
 	}
-	return ""
-}
-
-func keyFromPath(p string) string {
-	parts := strings.Split(filepath.ToSlash(p), "/objects/")
-	if len(parts) == 2 {
-		return parts[1]
+	defer f.Close()
+	h := md5.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
 	}
-	return filepath.Base(p)
+	return `"` + hex.EncodeToString(h.Sum(nil)) + `"`, nil
 }
