@@ -1,23 +1,38 @@
 # sssstore
 
-`sssstore` is a single-binary, S3-compatible object storage server.
+`sssstore` is an open-source, single-binary, S3-compatible object storage server designed for easy self-hosting, local development, edge deployments, and private cloud environments.
 
-## Quick start
+This repository includes the runnable server, CLI tooling, filesystem-backed storage engine, and project documentation needed to deploy and operate sssstore.
+
+## Documentation Index
+
+- [Installation Guide](./INSTALLATION.md)
+- [Project Information](./PROJECT_INFO.md)
+- [Best Use Cases](./USE_CASES.md)
+- [Examples](./EXAMPLES.md)
+- [User Guide](./USER_GUIDE.md)
+- [Admin Guide](./ADMIN_GUIDE.md)
+- [API Guide](./API_GUIDE.md)
+- [Operations Guide](./docs/OPERATIONS.md)
+- [Compatibility Matrix](./docs/COMPATIBILITY.md)
+- [Security Policy](./SECURITY.md)
+- [Contributing](./CONTRIBUTING.md)
+
+## Quick Start
 
 ```bash
 go run ./cmd/sssstore init --config ./sssstore.json --data ./data
+go run ./cmd/sssstore user create --config ./sssstore.json --name ci --access-key ci-key --secret-key ci-secret
 go run ./cmd/sssstore server --config ./sssstore.json
 ```
 
-Server defaults to `:9000`.
+## Current Highlights
 
-## Supported APIs (current)
+- Single binary deployment model
+- S3-style bucket/object APIs
+- Multipart upload support
+- Bucket versioning support
+- Structured logs, metrics, health/readiness endpoints
+- Audit logging and scrub/repair tooling
 
-- Bucket: create, delete, list buckets
-- Objects: put/get/head/delete
-- ListObjectsV2 (`?list-type=2`)
-- Health endpoint: `GET /healthz`
-
-## Notes
-
-This is an MVP implementation focused on local filesystem storage and baseline S3 path-style operations.
+For full details, use the documentation index above.
