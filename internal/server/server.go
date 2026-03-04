@@ -27,6 +27,7 @@ type metrics struct {
 func Run(cfg config.Config) error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	store := storage.New(cfg.DataDir)
+	defer store.Close()
 	if cfg.ReplicationMode == "local_mirror" && cfg.ReplicationDir != "" {
 		store.EnableReplication(cfg.ReplicationDir)
 	}
@@ -37,12 +38,15 @@ func Run(cfg config.Config) error {
 	}
 	defer auditLog.Close()
 
-	keys := []string{cfg.AdminAccessKey}
-	users, _ := config.LoadUsers(cfg.DataDir)
-	for _, u := range users {
-		keys = append(keys, u.AccessKey)
+	adminUser := config.User{
+		Name:      "admin",
+		AccessKey: cfg.AdminAccessKey,
+		SecretKey: cfg.AdminSecretKey,
+		Policy:    auth.PolicyAdmin,
 	}
-	a := auth.NewStaticAuthenticator(keys)
+	users, _ := config.LoadUsers(cfg.DataDir)
+	users = append(users, adminUser)
+	a := auth.NewSigV4Authenticator(users)
 	s3 := s3api.New(store, a)
 	m := &metrics{}
 

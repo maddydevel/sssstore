@@ -15,6 +15,25 @@ func sigV4Header(key string) string {
 	return "AWS4-HMAC-SHA256 Credential=" + key + "/20250101/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc"
 }
 
+type mockAuth struct {
+	allowed map[string]string
+}
+func (m *mockAuth) Authenticate(r *http.Request) (auth.Principal, error) {
+	key := auth.AccessKeyFromRequest(r)
+	if p, ok := m.allowed[key]; ok {
+		return auth.Principal{AccessKey: key, Policy: p}, nil
+	}
+	return auth.Principal{}, auth.ErrAccessDenied
+}
+func newMockAuth(keys []string) *mockAuth {
+	m := make(map[string]string)
+	for _, k := range keys {
+		m[k] = auth.PolicyAdmin
+	}
+	return &mockAuth{allowed: m}
+}
+
+
 func authedReq(method, url, body, key string) *http.Request {
 	req, _ := http.NewRequest(method, url, strings.NewReader(body))
 	req.Header.Set("Authorization", sigV4Header(key))
@@ -23,7 +42,7 @@ func authedReq(method, url, body, key string) *http.Request {
 
 func TestS3BasicFlow(t *testing.T) {
 	tmp := t.TempDir()
-	h := New(storage.New(tmp), auth.NewStaticAuthenticator([]string{"testkey"}))
+	h := New(storage.New(tmp), newMockAuth([]string{"testkey"}))
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
@@ -88,11 +107,44 @@ func TestS3BasicFlow(t *testing.T) {
 	if !strings.Contains(string(lb), "<Key>a.txt</Key>") {
 		t.Fatalf("list output missing key: %s", string(lb))
 	}
+
+	// Test Conditionals
+	req = authedReq(http.MethodGet, ts.URL+"/mybucket/a.txt", "", "testkey")
+	req.Header.Set("If-Match", `"wrong-etag"`)
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("If-Match wrong etag expected 412, got %d", resp.StatusCode)
+	}
+
+	req = authedReq(http.MethodGet, ts.URL+"/mybucket/a.txt", "", "testkey")
+	req.Header.Set("If-None-Match", `*`)
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotModified {
+		t.Fatalf("If-None-Match * expected 304, got %d", resp.StatusCode)
+	}
+
+	req = authedReq(http.MethodGet, ts.URL+"/mybucket/a.txt", "", "testkey")
+	req.Header.Set("If-Unmodified-Since", "Thu, 01 Jan 1970 00:00:00 GMT")
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("If-Unmodified-Since past expected 412, got %d", resp.StatusCode)
+	}
+
+	req = authedReq(http.MethodGet, ts.URL+"/mybucket/a.txt", "", "testkey")
+	req.Header.Set("If-Modified-Since", "Thu, 01 Jan 2099 00:00:00 GMT")
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotModified {
+		t.Fatalf("If-Modified-Since future expected 304, got %d", resp.StatusCode)
+	}
 }
 
 func TestAuthDenied(t *testing.T) {
 	tmp := t.TempDir()
-	h := New(storage.New(tmp), auth.NewStaticAuthenticator([]string{"allowed"}))
+	h := New(storage.New(tmp), newMockAuth([]string{"allowed"}))
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
@@ -109,7 +161,7 @@ func TestAuthDenied(t *testing.T) {
 
 func TestMultipartFlow(t *testing.T) {
 	tmp := t.TempDir()
-	h := New(storage.New(tmp), auth.NewStaticAuthenticator([]string{"testkey"}))
+	h := New(storage.New(tmp), newMockAuth([]string{"testkey"}))
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
@@ -172,7 +224,7 @@ func TestMultipartFlow(t *testing.T) {
 
 func TestVersioningFlow(t *testing.T) {
 	tmp := t.TempDir()
-	h := New(storage.New(tmp), auth.NewStaticAuthenticator([]string{"testkey"}))
+	h := New(storage.New(tmp), newMockAuth([]string{"testkey"}))
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 

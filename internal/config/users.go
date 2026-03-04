@@ -10,6 +10,7 @@ type User struct {
 	Name      string `json:"name"`
 	AccessKey string `json:"access_key"`
 	SecretKey string `json:"secret_key"`
+	Policy    string `json:"policy"`
 }
 
 func UsersFile(dataDir string) string { return filepath.Join(dataDir, "users.json") }
@@ -26,6 +27,11 @@ func LoadUsers(dataDir string) ([]User, error) {
 	var users []User
 	if err := json.Unmarshal(b, &users); err != nil {
 		return nil, err
+	}
+	for i := range users {
+		if users[i].Policy == "" {
+			users[i].Policy = "read-write"
+		}
 	}
 	return users, nil
 }

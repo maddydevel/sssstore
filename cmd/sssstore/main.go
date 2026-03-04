@@ -86,6 +86,7 @@ func doctorCmd(args []string) {
 	fmt.Printf("data_dir=%s\n", cfg.DataDir)
 	if *scrub {
 		st := storage.New(cfg.DataDir)
+		defer st.Close()
 		report, err := st.Scrub(*repair)
 		if err != nil {
 			log.Fatal(err)
@@ -96,16 +97,20 @@ func doctorCmd(args []string) {
 
 func userCmd(args []string) {
 	if len(args) == 0 || args[0] != "create" {
-		log.Fatal("usage: sssstore user create --config <path> --name <name> --access-key <key> --secret-key <secret>")
+		log.Fatal("usage: sssstore user create --config <path> --name <name> --access-key <key> --secret-key <secret> [--policy <admin|read-write|read-only>]")
 	}
 	fs := flag.NewFlagSet("user create", flag.ExitOnError)
 	cfgPath := fs.String("config", "./sssstore.json", "Path to config file")
 	name := fs.String("name", "", "User name")
 	accessKey := fs.String("access-key", "", "Access key")
 	secretKey := fs.String("secret-key", "", "Secret key")
+	policy := fs.String("policy", "read-write", "IAM Policy (admin, read-write, read-only)")
 	_ = fs.Parse(args[1:])
 	if *name == "" || *accessKey == "" || *secretKey == "" {
 		log.Fatal("name, access-key and secret-key are required")
+	}
+	if *policy != "admin" && *policy != "read-write" && *policy != "read-only" {
+		log.Fatal("policy must be 'admin', 'read-write', or 'read-only'")
 	}
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
@@ -115,9 +120,9 @@ func userCmd(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	users = append(users, config.User{Name: *name, AccessKey: *accessKey, SecretKey: *secretKey})
+	users = append(users, config.User{Name: *name, AccessKey: *accessKey, SecretKey: *secretKey, Policy: *policy})
 	if err := config.SaveUsers(cfg.DataDir, users); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("created user %s\n", *name)
+	fmt.Printf("created user %s with policy %s\n", *name, *policy)
 }

@@ -6,13 +6,13 @@ This repository includes the runnable server, CLI tooling, filesystem-backed sto
 
 ## Documentation Index
 
-- [Installation Guide](./INSTALLATION.md)
-- [Project Information](./PROJECT_INFO.md)
-- [Best Use Cases](./USE_CASES.md)
-- [Examples](./EXAMPLES.md)
-- [User Guide](./USER_GUIDE.md)
-- [Admin Guide](./ADMIN_GUIDE.md)
-- [API Guide](./API_GUIDE.md)
+- [Installation Guide](./docs/INSTALLATION.md)
+- [Project Information](./docs/PROJECT_INFO.md)
+- [Best Use Cases](./docs/USE_CASES.md)
+- [Examples](./docs/EXAMPLES.md)
+- [User Guide](./docs/USER_GUIDE.md)
+- [Admin Guide](./docs/ADMIN_GUIDE.md)
+- [API Guide](./docs/API_GUIDE.md)
 - [Operations Guide](./docs/OPERATIONS.md)
 - [Compatibility Matrix](./docs/COMPATIBILITY.md)
 - [Security Policy](./SECURITY.md)

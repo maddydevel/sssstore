@@ -2,8 +2,6 @@ package storage
 
 import (
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +10,7 @@ import (
 func TestBucketAndObjectLifecycle(t *testing.T) {
 	tmp := t.TempDir()
 	s := New(tmp)
+	defer s.Close()
 
 	if err := s.CreateBucket("test-bucket"); err != nil {
 		t.Fatalf("create bucket: %v", err)
@@ -51,6 +50,7 @@ func TestBucketAndObjectLifecycle(t *testing.T) {
 func TestMultipartLifecycle(t *testing.T) {
 	tmp := t.TempDir()
 	s := New(tmp)
+	defer s.Close()
 	if err := s.CreateBucket("mp-bucket"); err != nil {
 		t.Fatal(err)
 	}
@@ -81,6 +81,7 @@ func TestMultipartLifecycle(t *testing.T) {
 func TestCleanupStaleMultipartUploads(t *testing.T) {
 	tmp := t.TempDir()
 	s := New(tmp)
+	defer s.Close()
 	if err := s.CreateBucket("clean-bucket"); err != nil {
 		t.Fatal(err)
 	}
@@ -117,6 +118,7 @@ func TestCleanupStaleMultipartUploads(t *testing.T) {
 func TestVersioningLifecycle(t *testing.T) {
 	tmp := t.TempDir()
 	s := New(tmp)
+	defer s.Close()
 	if err := s.CreateBucket("v-bucket"); err != nil {
 		t.Fatal(err)
 	}
@@ -153,11 +155,12 @@ func TestScrubRepairRebuildsMissingMeta(t *testing.T) {
 	if _, err := s.PutObject("scrub-bucket", "a.txt", strings.NewReader("alpha")); err != nil {
 		t.Fatal(err)
 	}
-	root, _ := s.fsRoot()
-	meta := filepath.Join(root, "scrub-bucket", "objects", "a.txt.meta.json")
-	if err := os.Remove(meta); err != nil {
+
+	// Manually delete the meta from the bolt DB
+	if err := s.meta.DeleteObjectMeta("scrub-bucket", "a.txt"); err != nil {
 		t.Fatal(err)
 	}
+
 	report, err := s.Scrub(true)
 	if err != nil {
 		t.Fatal(err)
@@ -165,13 +168,16 @@ func TestScrubRepairRebuildsMissingMeta(t *testing.T) {
 	if report.MissingMeta < 1 {
 		t.Fatalf("expected missing meta detection, got %+v", report)
 	}
+
+	// Verify etag rebuilt
 	_, info, err := s.GetObject("scrub-bucket", "a.txt")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("get object failed: %v", err)
 	}
 	if info.ETag == "" {
 		t.Fatal("expected etag to be rebuilt")
 	}
+	_ = s.Close()
 }
 
 func TestScrubRepairRemovesOrphanMeta(t *testing.T) {
@@ -180,15 +186,12 @@ func TestScrubRepairRemovesOrphanMeta(t *testing.T) {
 	if err := s.CreateBucket("orphan-bucket"); err != nil {
 		t.Fatal(err)
 	}
-	root, _ := s.fsRoot()
-	objDir := filepath.Join(root, "orphan-bucket", "objects")
-	if err := os.MkdirAll(objDir, 0o755); err != nil {
+
+	// Insert orphan metadata into bolt DB
+	if err := s.meta.PutObjectMeta("orphan-bucket", "ghost.txt", "\"x\""); err != nil {
 		t.Fatal(err)
 	}
-	orphan := filepath.Join(objDir, "ghost.txt.meta.json")
-	if err := os.WriteFile(orphan, []byte(`{"etag":"\"x\""}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+
 	report, err := s.Scrub(true)
 	if err != nil {
 		t.Fatal(err)
@@ -196,7 +199,9 @@ func TestScrubRepairRemovesOrphanMeta(t *testing.T) {
 	if report.OrphanMeta < 1 {
 		t.Fatalf("expected orphan meta detection, got %+v", report)
 	}
-	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
-		t.Fatalf("expected orphan meta removed, err=%v", err)
+
+	if _, err := s.meta.GetObjectMeta("orphan-bucket", "ghost.txt"); err == nil {
+		t.Fatal("expected orphan meta removed")
 	}
+	_ = s.Close()
 }

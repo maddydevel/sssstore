@@ -4,31 +4,29 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
-	"strings"
+
+	"github.com/sssstore/sssstore/internal/config"
 )
 
 var (
 	ErrAccessDenied = errors.New("access denied")
-	credPattern     = regexp.MustCompile(`Credential=([^/\s,]+)`) // AWS4-HMAC-SHA256 Credential=<access-key>/...
+	credPattern     = regexp.MustCompile(`Credential=([^/\s,]+)`)
 )
 
 type Authenticator interface {
-	Authenticate(r *http.Request) error
+	Authenticate(r *http.Request) (Principal, error)
 }
 
-type StaticAuthenticator struct {
-	allowed map[string]struct{}
+type SigV4Authenticator struct {
+	users map[string]config.User
 }
 
-func NewStaticAuthenticator(keys []string) *StaticAuthenticator {
-	m := make(map[string]struct{}, len(keys))
-	for _, k := range keys {
-		if strings.TrimSpace(k) == "" {
-			continue
-		}
-		m[k] = struct{}{}
+func NewSigV4Authenticator(users []config.User) *SigV4Authenticator {
+	m := make(map[string]config.User, len(users))
+	for _, u := range users {
+		m[u.AccessKey] = u
 	}
-	return &StaticAuthenticator{allowed: m}
+	return &SigV4Authenticator{users: m}
 }
 
 func AccessKeyFromRequest(r *http.Request) string {
@@ -43,13 +41,25 @@ func AccessKeyFromRequest(r *http.Request) string {
 	return m[1]
 }
 
-func (a *StaticAuthenticator) Authenticate(r *http.Request) error {
+func (a *SigV4Authenticator) Authenticate(r *http.Request) (Principal, error) {
 	key := AccessKeyFromRequest(r)
 	if key == "" {
-		return ErrAccessDenied
+		return Principal{}, ErrAccessDenied
 	}
-	if _, ok := a.allowed[key]; !ok {
-		return ErrAccessDenied
+	u, ok := a.users[key]
+	if !ok {
+		return Principal{}, ErrAccessDenied
 	}
-	return nil
+	
+	// Perform robust AWS Signature (SigV4) Cryptographic Verification
+	_, err := VerifySigV4(r, u.SecretKey)
+	if err != nil {
+		return Principal{}, ErrAccessDenied
+	}
+
+	return Principal{
+		AccessKey: u.AccessKey,
+		Policy:    u.Policy,
+	}, nil
 }
+

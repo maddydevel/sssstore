@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"go.etcd.io/bbolt"
 )
 
 var (
@@ -54,15 +56,86 @@ type Store struct {
 	meta           MetadataStore
 	objects        ObjectBackend
 	replicationDir string
+	db             *bbolt.DB
 }
 
 func New(root string) *Store {
 	base := filepath.Join(root, "buckets")
+	_ = os.MkdirAll(base, 0o755)
+
+	dbPath := filepath.Join(base, "metadata.db")
+	dbExists := false
+	if _, err := os.Stat(dbPath); err == nil {
+		dbExists = true
+	}
+
+	db, err := bbolt.Open(dbPath, 0o600, &bbolt.Options{Timeout: 1 * time.Second})
+	if err != nil {
+		panic("failed to open bbolt metadata db: " + err.Error())
+	}
+
+	boltMeta, err := newBboltMetadataStore(db)
+	if err != nil {
+		panic("failed to init bbolt metadata store: " + err.Error())
+	}
+
+	if !dbExists {
+		// Run a one-time migration from .meta.json to bbolt
+		migrateFSMetadataToBbolt(base, boltMeta)
+	}
+
 	return &Store{
-		meta:    newFSMetadataStore(base),
+		meta:    boltMeta,
 		objects: newFSObjectBackend(base),
+		db:      db,
 	}
 }
+
+func (s *Store) Close() error {
+	if s.db != nil {
+		return s.db.Close()
+	}
+	return nil
+}
+
+func migrateFSMetadataToBbolt(root string, meta MetadataStore) {
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(path, ".meta.json") {
+			return nil
+		}
+
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return nil
+		}
+		
+		parts := strings.SplitN(rel, string(filepath.Separator), 3)
+		if len(parts) < 3 || parts[1] != "objects" {
+			return nil
+		}
+		
+		bucket := parts[0]
+		keyMeta := filepath.ToSlash(parts[2])
+		key := strings.TrimSuffix(keyMeta, ".meta.json")
+
+		b, err := os.ReadFile(path)
+		if err == nil {
+			var om objectMeta
+			if json.Unmarshal(b, &om) == nil {
+				_ = meta.CreateBucket(bucket)
+				_ = meta.PutObjectMeta(bucket, key, om.ETag)
+			}
+		}
+		
+		// Remove migrated legacy file
+		_ = os.Remove(path)
+		return nil
+	})
+}
+
 
 func (s *Store) EnableReplication(dir string) {
 	s.replicationDir = dir

@@ -24,16 +24,21 @@ func New(store *storage.Store, a auth.Authenticator) http.Handler {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var principal auth.Principal
 	if h.auth != nil {
-		if err := h.auth.Authenticate(r); err != nil {
+		p, err := h.auth.Authenticate(r)
+		if err != nil {
 			h.writeError(w, http.StatusForbidden, "AccessDenied", err.Error())
 			return
 		}
+		principal = p
 	}
 
 	if r.URL.Path == "/" {
 		if r.Method == http.MethodGet {
-			h.listBuckets(w)
+			if h.authorize(w, principal, "s3:ListAllMyBuckets") {
+				h.listBuckets(w)
+			}
 			return
 		}
 		h.writeError(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "unsupported method")
@@ -49,35 +54,60 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	key := strings.Join(parts[1:], "/")
 
 	if key == "" {
-		h.routeBucket(w, r, bucket)
+		h.routeBucket(w, r, bucket, principal)
 		return
 	}
-	h.routeObject(w, r, bucket, key)
+	h.routeObject(w, r, bucket, key, principal)
 }
 
-func (h *Handler) routeBucket(w http.ResponseWriter, r *http.Request, bucket string) {
+func (h *Handler) authorize(w http.ResponseWriter, p auth.Principal, action string) bool {
+	if h.auth == nil {
+		return true // auth is bypassed entirely
+	}
+	if err := p.Authorize(action); err != nil {
+		h.writeError(w, http.StatusForbidden, "AccessDenied", err.Error())
+		return false
+	}
+	return true
+}
+
+func (h *Handler) routeBucket(w http.ResponseWriter, r *http.Request, bucket string, p auth.Principal) {
 	switch r.Method {
 	case http.MethodPut:
 		if _, ok := r.URL.Query()["versioning"]; ok {
-			h.putBucketVersioning(w, r, bucket)
+			if h.authorize(w, p, "s3:PutBucketVersioning") {
+				h.putBucketVersioning(w, r, bucket)
+			}
 			return
 		}
-		h.createBucket(w, bucket)
+		if h.authorize(w, p, "s3:CreateBucket") {
+			h.createBucket(w, bucket)
+		}
 	case http.MethodDelete:
-		h.deleteBucket(w, bucket)
+		if h.authorize(w, p, "s3:DeleteBucket") {
+			h.deleteBucket(w, bucket)
+		}
 	case http.MethodHead:
-		h.headBucket(w, bucket)
+		if h.authorize(w, p, "s3:HeadBucket") {
+			h.headBucket(w, bucket)
+		}
 	case http.MethodGet:
 		if _, ok := r.URL.Query()["versioning"]; ok {
-			h.getBucketVersioning(w, bucket)
+			if h.authorize(w, p, "s3:GetBucketVersioning") {
+				h.getBucketVersioning(w, bucket)
+			}
 			return
 		}
 		if _, ok := r.URL.Query()["versions"]; ok {
-			h.listObjectVersions(w, bucket, r.URL.Query().Get("prefix"), r.URL.Query().Get("max-keys"))
+			if h.authorize(w, p, "s3:ListBucketVersions") {
+				h.listObjectVersions(w, bucket, r.URL.Query().Get("prefix"), r.URL.Query().Get("max-keys"))
+			}
 			return
 		}
 		if r.URL.Query().Get("list-type") == "2" {
-			h.listObjectsV2(w, bucket, r.URL.Query().Get("prefix"), r.URL.Query().Get("max-keys"), r.URL.Query().Get("continuation-token"))
+			if h.authorize(w, p, "s3:ListBucket") {
+				h.listObjectsV2(w, bucket, r.URL.Query().Get("prefix"), r.URL.Query().Get("max-keys"), r.URL.Query().Get("continuation-token"))
+			}
 			return
 		}
 		h.writeError(w, http.StatusNotImplemented, "NotImplemented", "only list-type=2, versioning, and versions are supported for bucket GET")
@@ -86,35 +116,63 @@ func (h *Handler) routeBucket(w http.ResponseWriter, r *http.Request, bucket str
 	}
 }
 
-func (h *Handler) routeObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
+func (h *Handler) routeObject(w http.ResponseWriter, r *http.Request, bucket, key string, p auth.Principal) {
 	q := r.URL.Query()
 	switch r.Method {
 	case http.MethodPost:
 		if _, ok := q["uploads"]; ok {
-			h.createMultipartUpload(w, bucket, key)
+			if h.authorize(w, p, "s3:PutObject") {
+				h.createMultipartUpload(w, bucket, key)
+			}
 			return
 		}
 		if q.Get("uploadId") != "" {
-			h.completeMultipartUpload(w, bucket, key, q.Get("uploadId"))
+			if h.authorize(w, p, "s3:PutObject") {
+				h.completeMultipartUpload(w, bucket, key, q.Get("uploadId"))
+			}
 			return
 		}
 		h.writeError(w, http.StatusNotImplemented, "NotImplemented", "unsupported POST operation")
 	case http.MethodPut:
 		if q.Get("uploadId") != "" && q.Get("partNumber") != "" {
-			h.uploadPart(w, r, bucket, key, q.Get("uploadId"), q.Get("partNumber"))
+			if h.authorize(w, p, "s3:PutObject") {
+				h.uploadPart(w, r, bucket, key, q.Get("uploadId"), q.Get("partNumber"))
+			}
 			return
 		}
-		h.putObject(w, r, bucket, key)
+		if h.authorize(w, p, "s3:PutObject") {
+			h.putObject(w, r, bucket, key)
+		}
 	case http.MethodGet:
-		h.getObject(w, r, bucket, key)
+		if h.authorize(w, p, "s3:GetObject") {
+			h.getObject(w, r, bucket, key)
+		}
 	case http.MethodHead:
-		h.headObject(w, bucket, key, q.Get("versionId"))
+		if q.Get("versionId") != "" {
+			if h.authorize(w, p, "s3:GetObjectVersion") {
+				h.headObject(w, bucket, key, q.Get("versionId"))
+			}
+			return
+		}
+		if h.authorize(w, p, "s3:GetObject") {
+			h.headObject(w, bucket, key, "")
+		}
 	case http.MethodDelete:
 		if q.Get("uploadId") != "" {
-			h.abortMultipartUpload(w, bucket, q.Get("uploadId"))
+			if h.authorize(w, p, "s3:AbortMultipartUpload") {
+				h.abortMultipartUpload(w, bucket, q.Get("uploadId"))
+			}
 			return
 		}
-		h.deleteObject(w, bucket, key, q.Get("versionId"))
+		if q.Get("versionId") != "" {
+			if h.authorize(w, p, "s3:DeleteObjectVersion") {
+				h.deleteObject(w, bucket, key, q.Get("versionId"))
+			}
+			return
+		}
+		if h.authorize(w, p, "s3:DeleteObject") {
+			h.deleteObject(w, bucket, key, "")
+		}
 	default:
 		h.writeError(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "unsupported method")
 	}
@@ -381,6 +439,38 @@ func parseRange(hdr string, size int64) (start, end int64, ok bool) {
 	}
 	return s, e, true
 }
+func checkPreconditions(w http.ResponseWriter, r *http.Request, info storage.ObjectInfo) bool {
+	if match := r.Header.Get("If-Match"); match != "" {
+		if info.ETag != match {
+			w.WriteHeader(http.StatusPreconditionFailed)
+			return false
+		}
+	}
+	if noneMatch := r.Header.Get("If-None-Match"); noneMatch != "" {
+		if info.ETag == noneMatch || noneMatch == "*" {
+			w.WriteHeader(http.StatusNotModified)
+			return false
+		}
+	}
+	if unmodSince := r.Header.Get("If-Unmodified-Since"); unmodSince != "" {
+		if t, err := http.ParseTime(unmodSince); err == nil {
+			if info.LastModified.After(t) {
+				w.WriteHeader(http.StatusPreconditionFailed)
+				return false
+			}
+		}
+	}
+	if modSince := r.Header.Get("If-Modified-Since"); modSince != "" {
+		if t, err := http.ParseTime(modSince); err == nil {
+			if !info.LastModified.After(t) {
+				w.WriteHeader(http.StatusNotModified)
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (h *Handler) getObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
 	rc, info, err := h.store.GetObjectVersion(bucket, key, r.URL.Query().Get("versionId"))
 	if errors.Is(err, storage.ErrObjectNotFound) {
@@ -397,6 +487,11 @@ func (h *Handler) getObject(w http.ResponseWriter, r *http.Request, bucket, key 
 	if info.ETag != "" {
 		w.Header().Set("ETag", info.ETag)
 	}
+
+	if !checkPreconditions(w, r, info) {
+		return
+	}
+
 	if rg := r.Header.Get("Range"); rg != "" {
 		if rs, ok := rc.(io.ReadSeeker); ok {
 			start, end, valid := parseRange(rg, info.Size)
