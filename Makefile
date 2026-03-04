@@ -1,4 +1,4 @@
-.PHONY: check-conflicts fmt test vet build ci image clean
+.PHONY: check-conflicts fmt test vet build ci qa image clean
 
 BINARY=sssstore
 PKG=./cmd/sssstore
@@ -22,6 +22,9 @@ build:
 	go build -trimpath -ldflags "-s -w" -o bin/$(BINARY) $(PKG)
 
 ci: check-conflicts fmt vet test build
+
+qa:
+	./scripts/qa.sh
 
 image:
 	docker build -t sssstore:local .
