@@ -1,7 +1,13 @@
-.PHONY: fmt test vet build ci image clean
+.PHONY: check-conflicts fmt test vet build ci image clean
 
 BINARY=sssstore
 PKG=./cmd/sssstore
+
+check-conflicts:
+	@if rg -n "^(<<<<<<<|=======|>>>>>>>)" --glob '!*.md' --glob '!*go.sum' .; then \
+		echo "merge conflict markers found"; \
+		exit 1; \
+	fi
 
 fmt:
 	gofmt -w $(shell find . -name "*.go" -type f)
@@ -15,7 +21,7 @@ vet:
 build:
 	go build -trimpath -ldflags "-s -w" -o bin/$(BINARY) $(PKG)
 
-ci: fmt vet test build
+ci: check-conflicts fmt vet test build
 
 image:
 	docker build -t sssstore:local .
