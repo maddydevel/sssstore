@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sssstore-config
+data:
+  sssstore.json: |
+    {
+      "bind_addr": ":9000",
+      "data_dir": "/var/lib/sssstore",
+      "admin_access_key": "sssadmin",
+      "admin_secret_key": "replace-me",
+      "strict_mode": true,
+      "audit_log_path": "/var/lib/sssstore/audit.log",
+      "multipart_max_age_hours": 24,
+      "replication_mode": "none",
+      "replication_dir": ""
+    }

@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sssstore
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sssstore
+  template:
+    metadata:
+      labels:
+        app: sssstore
+    spec:
+      containers:
+        - name: sssstore
+          image: sssstore:local
+          args: ["server", "--config", "/etc/sssstore/sssstore.json"]
+          ports:
+            - containerPort: 9000
+          volumeMounts:
+            - name: config
+              mountPath: /etc/sssstore
+            - name: data
+              mountPath: /var/lib/sssstore
+      volumes:
+        - name: config
+          configMap:
+            name: sssstore-config
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sssstore
+spec:
+  selector:
+    app: sssstore
+  ports:
+    - name: http
+      port: 9000
+      targetPort: 9000
