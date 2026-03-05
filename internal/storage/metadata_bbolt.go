@@ -3,6 +3,8 @@ package storage
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,10 +17,11 @@ var (
 )
 
 type bboltMetadataStore struct {
-	db *bbolt.DB
+	db   *bbolt.DB
+	root string
 }
 
-func newBboltMetadataStore(db *bbolt.DB) (*bboltMetadataStore, error) {
+func newBboltMetadataStore(db *bbolt.DB, root string) (*bboltMetadataStore, error) {
 	err := db.Update(func(tx *bbolt.Tx) error {
 		if _, err := tx.CreateBucketIfNotExists(bucketInfoBucket); err != nil {
 			return err
@@ -31,7 +34,7 @@ func newBboltMetadataStore(db *bbolt.DB) (*bboltMetadataStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &bboltMetadataStore{db: db}, nil
+	return &bboltMetadataStore{db: db, root: root}, nil
 }
 
 func (m *bboltMetadataStore) ListBuckets() ([]BucketInfo, error) {
@@ -66,7 +69,7 @@ func (m *bboltMetadataStore) CreateBucket(bucket string) error {
 	if !validateBucket(bucket) {
 		return errors.New("invalid bucket name")
 	}
-	return m.db.Update(func(tx *bbolt.Tx) error {
+	err := m.db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketInfoBucket)
 		if b.Get([]byte(bucket)) != nil {
 			return nil // already exists
@@ -74,10 +77,14 @@ func (m *bboltMetadataStore) CreateBucket(bucket string) error {
 		t, _ := time.Now().UTC().MarshalText()
 		return b.Put([]byte(bucket), t)
 	})
+	if err == nil {
+		os.MkdirAll(filepath.Join(m.root, bucket, "objects"), 0o755)
+	}
+	return err
 }
 
 func (m *bboltMetadataStore) DeleteBucket(bucket string) error {
-	return m.db.Update(func(tx *bbolt.Tx) error {
+	err := m.db.Update(func(tx *bbolt.Tx) error {
 		bInfo := tx.Bucket(bucketInfoBucket)
 		if bInfo.Get([]byte(bucket)) == nil {
 			return ErrBucketNotFound
@@ -94,6 +101,10 @@ func (m *bboltMetadataStore) DeleteBucket(bucket string) error {
 
 		return bInfo.Delete([]byte(bucket))
 	})
+	if err == nil {
+		os.RemoveAll(filepath.Join(m.root, bucket))
+	}
+	return err
 }
 
 func (m *bboltMetadataStore) PutObjectMeta(bucket, key, etag string) error {

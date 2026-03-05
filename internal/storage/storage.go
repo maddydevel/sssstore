@@ -74,7 +74,7 @@ func New(root string) *Store {
 		panic("failed to open bbolt metadata db: " + err.Error())
 	}
 
-	boltMeta, err := newBboltMetadataStore(db)
+	boltMeta, err := newBboltMetadataStore(db, base)
 	if err != nil {
 		panic("failed to init bbolt metadata store: " + err.Error())
 	}

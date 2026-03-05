@@ -32,7 +32,7 @@ go test -run 'TestBucketAndObjectLifecycle|TestMultipartLifecycle|TestVersioning
 
 echo "[qa] setup runtime"
 "$BIN" init --config "$CONFIG_PATH" --data "$DATA_DIR" >/dev/null
-python - <<PY
+python3 - <<PY
 import json
 p = r"$CONFIG_PATH"
 with open(p, "r", encoding="utf-8") as f:
@@ -41,7 +41,7 @@ cfg["bind_addr"] = ":$PORT"
 with open(p, "w", encoding="utf-8") as f:
     json.dump(cfg, f, indent=2)
 PY
-"$BIN" user create --config "$CONFIG_PATH" --name qa --access-key qa-key --secret-key qa-secret >/dev/null
+"$BIN" user create --config "$CONFIG_PATH" --name qa --access-key qa-key --secret-key qa-secret --policy admin >/dev/null
 
 echo "[qa] start server"
 "$BIN" server --config "$CONFIG_PATH" >/tmp/sssstore-qa-server.log 2>&1 &
@@ -73,7 +73,7 @@ go test -run TestLoadStrictModeValidation ./internal/config >/dev/null
 curl -sS -o /tmp/qa-denied.xml -w '%{http_code}' "${BASE_URL}/" | grep -q '^403$'
 
 echo "[qa] performance smoke"
-python - <<PY
+python3 - <<PY
 import time, urllib.request
 N=30
 url=r"$BASE_URL/sysbucket/obj.txt"
