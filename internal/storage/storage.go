@@ -111,12 +111,12 @@ func migrateFSMetadataToBbolt(root string, meta MetadataStore) {
 		if err != nil {
 			return nil
 		}
-		
+
 		parts := strings.SplitN(rel, string(filepath.Separator), 3)
 		if len(parts) < 3 || parts[1] != "objects" {
 			return nil
 		}
-		
+
 		bucket := parts[0]
 		keyMeta := filepath.ToSlash(parts[2])
 		key := strings.TrimSuffix(keyMeta, ".meta.json")
@@ -129,13 +129,12 @@ func migrateFSMetadataToBbolt(root string, meta MetadataStore) {
 				_ = meta.PutObjectMeta(bucket, key, om.ETag)
 			}
 		}
-		
+
 		// Remove migrated legacy file
 		_ = os.Remove(path)
 		return nil
 	})
 }
-
 
 func (s *Store) EnableReplication(dir string) {
 	s.replicationDir = dir
