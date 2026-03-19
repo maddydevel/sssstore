@@ -39,7 +39,9 @@ func (s *Store) CreateMultipartUpload(bucket, key string) (string, error) {
 	if err := os.MkdirAll(p, 0o755); err != nil {
 		return "", err
 	}
-	_ = os.WriteFile(filepath.Join(p, "key"), []byte(key), 0o644)
+	if err := os.WriteFile(filepath.Join(p, "key"), []byte(key), 0o644); err != nil {
+		return "", err
+	}
 	return uploadID, nil
 }
 
@@ -66,7 +68,9 @@ func (s *Store) UploadPart(bucket, key, uploadID string, partNumber int, r io.Re
 		return MultipartPart{}, err
 	}
 	etag := `"` + hex.EncodeToString(h.Sum(nil)) + `"`
-	_ = os.WriteFile(partPath+".etag", []byte(etag), 0o644)
+	if err := os.WriteFile(partPath+".etag", []byte(etag), 0o644); err != nil {
+		return MultipartPart{}, err
+	}
 	return MultipartPart{PartNumber: partNumber, ETag: etag, Size: n}, nil
 }
 
@@ -93,13 +97,15 @@ func (s *Store) CompleteMultipartUpload(bucket, key, uploadID string) (ObjectInf
 		for _, pn := range parts {
 			f, err := os.Open(filepath.Join(p, pn))
 			if err != nil {
-				_ = pw.CloseWithError(err)
+				pw.CloseWithError(err)
 				return
 			}
 			_, err = io.Copy(pw, f)
-			_ = f.Close()
+			if cerr := f.Close(); err == nil {
+				err = cerr
+			}
 			if err != nil {
-				_ = pw.CloseWithError(err)
+				pw.CloseWithError(err)
 				return
 			}
 		}
@@ -108,7 +114,9 @@ func (s *Store) CompleteMultipartUpload(bucket, key, uploadID string) (ObjectInf
 	if err != nil {
 		return ObjectInfo{}, err
 	}
-	_ = os.RemoveAll(p)
+	if err := os.RemoveAll(p); err != nil {
+		return info, err
+	}
 	return info, nil
 }
 
